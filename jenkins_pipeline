@@ -1,0 +1,201 @@
+pipeline {
+    agent any
+
+    environment {
+        cluster_state_file_path = "terraform/environments/measurements/staging/model-map-measurements-transient-emr-v12"
+        //  AWS_ACCESS_KEY_ID     = credentials('AWS_ACCESS_KEY_ID')
+        //  AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
+        //BUCKET_NAME="midgar-cdo-ap-south-1-tfstates"
+    }
+
+    parameters {
+       booleanParam(name: 'autoApprove', defaultValue: false, description: 'Automatically run apply after generating plan?')
+       choice(name: 'ACTION',	choices: [ 'create', 'destroy'],
+				description: 'Run terraform  create / destroy')
+                 
+    }
+    
+    stages {
+        stage('Assume role'){
+            // when {
+            //     environment name: 'DEPLOY', value: 'true'
+            // }
+            steps{
+                // dir("${env.WORKSPACE}/cdp-sre-ppsl/deployments/airflow-dag-sync") {
+                    script{
+                            sh """
+                            echo 'Assume Role'
+                            response=\$(aws sts assume-role --role-arn arn:aws:iam::account_no:role/t-emr-din-jenkins-role --role-session-name EC2Session)
+                            export AWS_ACCESS_KEY_ID=\$(echo \$response | jq -r .Credentials.AccessKeyId)
+                            export AWS_SECRET_ACCESS_KEY=\$(echo \$response | jq -r .Credentials.SecretAccessKey)
+                            export AWS_SESSION_TOKEN=\$(echo \$response | jq -r .Credentials.SessionToken)
+                            aws sts get-caller-identity
+                            echo 'ASSUME ROLE WORKED'
+                            
+                        """
+                    }
+                // }
+            }
+        }
+      stage ('Pre-building') {
+          steps{
+             script{          
+                if (env.ACTION == 'create') {           
+                  // send build started notifications
+                  slackSend (color: '#FFFF00', message: "STARTED: Creating EMR CLUSTER '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL})")
+                 }
+                else  {
+                 // send build started notifications
+                  slackSend (color: '#FFFF00', message: "STARTED: Destroying EMR CLUSTER '${env.JOB_NAME} [${env.BUILD_NUMBER}]' (${env.BUILD_URL})")
+                }
+             }
+            }  
+        } 
+        
+       stage('Git Clone'){
+             when{ anyOf
+					{
+						environment name: 'ACTION', value: 'create'
+					}
+             }
+             steps {
+                cleanWs()
+                git url: 'git@bitbucket.org:paytmteam/cdo-infra.git',
+                    branch: 'feature/CDOD-25665',
+                    credentialsId: 'cdo-infra'
+             }
+        }
+
+
+        stage('Plan') {
+          steps {
+            dir("${env.cluster_state_file_path}") {
+                script{
+                   if (env.ACTION == 'create') {
+                        sh """ 
+                        aws sts get-caller-identity
+                        echo 'Assume Role'
+                        response=\$(aws sts assume-role --role-arn arn:aws:iam::account_no:role/t-emr-din-jenkins-role --role-session-name EC2Session)
+                        export AWS_ACCESS_KEY_ID=\$(echo \$response | jq -r .Credentials.AccessKeyId)
+                        export AWS_SECRET_ACCESS_KEY=\$(echo \$response | jq -r .Credentials.SecretAccessKey)
+                        export AWS_SESSION_TOKEN=\$(echo \$response | jq -r .Credentials.SessionToken)
+                        aws sts get-caller-identity
+                        echo 'ASSUME ROLE WORKED'
+                        /usr/local/bin/terraform-1.1.7 init
+                            
+                        aws sts get-caller-identity
+                        /usr/local/bin/terraform-1.1.7 plan --var-file=${env.WORKSPACE}/terraform/environments/measurements/staging/model-map-measurements-transient-emr-v12/map-env-feature.tfvars -out tfplan
+                        /usr/local/bin/terraform-1.1.7 show -no-color tfplan > tfplan.txt
+                        """
+                    }
+                   else {
+                        sh """ 
+                        aws sts get-caller-identity
+                        echo 'Assume Role'
+                        response=\$(aws sts assume-role --role-arn arn:aws:iam::account_no:role/t-emr-din-jenkins-role --role-session-name EC2Session)
+                        export AWS_ACCESS_KEY_ID=\$(echo \$response | jq -r .Credentials.AccessKeyId)
+                        export AWS_SECRET_ACCESS_KEY=\$(echo \$response | jq -r .Credentials.SecretAccessKey)
+                        export AWS_SESSION_TOKEN=\$(echo \$response | jq -r .Credentials.SessionToken)
+                        aws sts get-caller-identity
+                        echo 'ASSUME ROLE WORKED'
+                        /usr/local/bin/terraform-1.1.7 init
+                        
+                        /usr/local/bin/terraform-1.1.7 plan --var-file=${env.WORKSPACE}/terraform/environments/measurements/staging/model-map-measurements-transient-emr-v12/map-env-feature.tfvars -destroy -out tfplan
+                        /usr/local/bin/terraform-1.1.7 show  -no-color tfplan > tfplan.txt
+                        """    
+                    }
+                }
+            }
+          }
+        }
+
+        stage('Approval') {
+            when {
+                not {
+                    equals expected: true, actual: params.autoApprove
+                }
+            }
+
+            steps {
+                script {
+                    dir("${env.cluster_state_file_path}") {    
+                        def plan = readFile 'tfplan.txt'
+                        input message: "Do you want to apply the plan?",
+                        parameters: [text(name: 'Plan', description: 'Please review the plan', defaultValue: plan)]
+                    }
+                }
+            }
+        }
+
+        stage('Apply') {
+           when{ anyOf
+					{
+						environment name: 'ACTION', value: 'create'
+					}
+           }
+            steps {
+               dir("${env.cluster_state_file_path}") {
+                 sh """ 
+                    aws sts get-caller-identity  
+                    echo 'Assume Role'
+                    response=\$(aws sts assume-role --role-arn arn:aws:iam::account_no:role/t-emr-din-jenkins-role --role-session-name EC2Session)
+                    export AWS_ACCESS_KEY_ID=\$(echo \$response | jq -r .Credentials.AccessKeyId)
+                    export AWS_SECRET_ACCESS_KEY=\$(echo \$response | jq -r .Credentials.SecretAccessKey)
+                    export AWS_SESSION_TOKEN=\$(echo \$response | jq -r .Credentials.SessionToken)
+                    aws sts get-caller-identity
+                    echo 'ASSUME ROLE WORKED'
+                    /usr/local/bin/terraform-1.1.7 init
+                    aws sts get-caller-identity  
+                    
+                    /usr/local/bin/terraform-1.1.7 apply --var-file=${env.WORKSPACE}/terraform/environments/measurements/staging/model-map-measurements-transient-emr-v12/map-env-feature.tfvars --auto-approve
+                 """
+                }    
+            }
+        }
+    
+     stage('Destroy') {
+        when {
+            anyOf
+				{
+					environment name: 'Action', value: 'destroy'
+				}
+        }
+		steps {
+		    dir("${env.cluster_state_file_path}") {        
+                sh """
+                aws sts get-caller-identity  
+                echo 'Assume Role'
+                response=\$(aws sts assume-role --role-arn arn:aws:iam::account_no:role/t-emr-din-jenkins-role --role-session-name EC2Session)
+                export AWS_ACCESS_KEY_ID=\$(echo \$response | jq -r .Credentials.AccessKeyId)
+                export AWS_SECRET_ACCESS_KEY=\$(echo \$response | jq -r .Credentials.SecretAccessKey)
+                export AWS_SESSION_TOKEN=\$(echo \$response | jq -r .Credentials.SessionToken)
+                aws sts get-caller-identity
+                echo 'ASSUME ROLE WORKED'
+                /usr/local/bin/terraform-1.1.7 init
+                aws sts get-caller-identity  
+                
+                /usr/local/bin/terraform-1.1.7 destroy --var-file=${env.WORKSPACE}/terraform/environments/measurements/staging/model-map-measurements-transient-emr-v12/map-env-feature.tfvars -auto-approve
+                """
+            }    
+        }
+    }
+
+    // post {
+    //   success {
+    //     dir("${env.cluster_state_file_path}") { 
+    //         script{          
+    //             if (env.ACTION == 'create') {            
+    //               slackSend (color: '#00FF00', message: "EMR cluster created. Pls use the master's node IP to connect with resouce manager using your ldap user. ") 
+    //             }
+    //             else{
+    //               slackSend (color: '#00FF00', message:"EMR cluster destroyed.Pls run the jenkins job again (${env.BUILD_URL}) to recreate it . ") 
+    //             }
+    //         }
+    //     }
+    //   }
+    // }
+}
+   
+
+
+}
